@@ -1,6 +1,5 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen } = require('electron');
 const path = require('path');
-const zlib = require('zlib');
 const fs = require('fs');
 const os = require('os');
 const { execFile } = require('child_process');
@@ -28,47 +27,59 @@ const VK_RETURN  = 0x0D;
 const VK_C       = 0x43;
 const KEYUP      = 0x0002;
 
-// ── Tiny PNG encoder (for tray icon, no deps) ──────────────────────────────
-function makePNG(w, h, rgba) {
-  const tbl = new Int32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    tbl[n] = c;
-  }
-  const crc32 = buf => { let c = -1; for (let i = 0; i < buf.length; i++) c = tbl[(c ^ buf[i]) & 0xff] ^ (c >>> 8); return (c ^ -1) >>> 0; };
-  const chunk = (type, data) => {
-    const t = Buffer.from(type), len = Buffer.alloc(4), crc = Buffer.alloc(4);
-    len.writeUInt32BE(data.length);
-    crc.writeUInt32BE(crc32(Buffer.concat([t, data])));
-    return Buffer.concat([len, t, data, crc]);
-  };
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 6;
-  const raw = Buffer.alloc(h * (1 + w * 4));
-  for (let y = 0; y < h; y++) { raw[y * (1 + w * 4)] = 0; rgba.copy(raw, y * (1 + w * 4) + 1, y * w * 4, (y + 1) * w * 4); }
-  return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
-}
-
 function createTrayIconFallback() {
-  const s = 16, px = Buffer.alloc(s * s * 4);
-  for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
-    const i = (y * s + x) * 4, d = Math.hypot(x - 7.5, y - 7.5);
-    if (d < 6.5) { px[i] = 200; px[i+1] = 40; px[i+2] = 40; px[i+3] = 255; }
+  const p = path.join(__dirname, 'icon', 'Template.png');
+  if (fs.existsSync(p)) {
+    const img = nativeImage.createFromPath(p);
+    if (!img.isEmpty()) {
+      if (process.platform === 'darwin') img.setTemplateImage(true);
+      return img;
+    }
   }
-  const tmp = path.join(os.tmpdir(), 'badclaude-icon.png');
-  fs.writeFileSync(tmp, makePNG(s, s, px));
-  return nativeImage.createFromPath(tmp);
+  console.warn('badclaude: icon/Template.png missing or invalid');
+  return nativeImage.createEmpty();
 }
 
-function getTrayIcon() {
+async function tryIcnsTrayImage(icnsPath) {
+  const size = { width: 64, height: 64 };
+  const thumb = await nativeImage.createThumbnailFromPath(icnsPath, size);
+  if (!thumb.isEmpty()) return thumb;
+  return null;
+}
+
+// macOS: createFromPath does not decode .icns (Electron only loads PNG/JPEG there, ICO on Windows).
+// Quick Look thumbnails handle .icns; copy to temp if the file is inside ASAR (QL needs a real path).
+async function getTrayIcon() {
   const iconDir = path.join(__dirname, 'icon');
-  const file =
-    process.platform === 'win32' ? path.join(iconDir, 'icon.ico')
-    : process.platform === 'darwin' ? path.join(iconDir, 'AppIcon.icns')
-    : null;
-  if (file && fs.existsSync(file)) {
-    const img = nativeImage.createFromPath(file);
-    if (!img.isEmpty()) return img;
+  if (process.platform === 'win32') {
+    const file = path.join(iconDir, 'icon.ico');
+    if (fs.existsSync(file)) {
+      const img = nativeImage.createFromPath(file);
+      if (!img.isEmpty()) return img;
+    }
+    return createTrayIconFallback();
+  }
+  if (process.platform === 'darwin') {
+    const file = path.join(iconDir, 'AppIcon.icns');
+    if (fs.existsSync(file)) {
+      const fromPath = nativeImage.createFromPath(file);
+      if (!fromPath.isEmpty()) return fromPath;
+      try {
+        const t = await tryIcnsTrayImage(file);
+        if (t) return t;
+      } catch (e) {
+        console.warn('AppIcon.icns Quick Look thumbnail failed:', e?.message || e);
+      }
+      const tmp = path.join(os.tmpdir(), 'badclaude-tray.icns');
+      try {
+        fs.copyFileSync(file, tmp);
+        const t = await tryIcnsTrayImage(tmp);
+        if (t) return t;
+      } catch (e) {
+        console.warn('AppIcon.icns temp copy + thumbnail failed:', e?.message || e);
+      }
+    }
+    return createTrayIconFallback();
   }
   return createTrayIconFallback();
 }
@@ -197,8 +208,8 @@ function sendMacroMac(text) {
 }
 
 // ── App lifecycle ───────────────────────────────────────────────────────────
-app.whenReady().then(() => {
-  tray = new Tray(getTrayIcon());
+app.whenReady().then(async () => {
+  tray = new Tray(await getTrayIcon());
   tray.setToolTip('Bad Claude – click for whip');
   tray.setContextMenu(
     Menu.buildFromTemplate([
