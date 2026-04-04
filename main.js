@@ -25,7 +25,37 @@ let spawnQueued = false;
 const VK_CONTROL = 0x11;
 const VK_RETURN  = 0x0D;
 const VK_C       = 0x43;
+const VK_MENU    = 0x12; // Alt
+const VK_TAB     = 0x09;
 const KEYUP      = 0x0002;
+
+/** One Alt+Tab / Cmd+Tab so focus returns to the previously active app after tray click. */
+function refocusPreviousApp() {
+  const delayMs = 80;
+  const run = () => {
+    if (process.platform === 'win32') {
+      if (!keybd_event) return;
+      keybd_event(VK_MENU, 0, 0, 0);
+      keybd_event(VK_TAB, 0, 0, 0);
+      keybd_event(VK_TAB, 0, KEYUP, 0);
+      keybd_event(VK_MENU, 0, KEYUP, 0);
+    } else if (process.platform === 'darwin') {
+      const script = [
+        'tell application "System Events"',
+        '  key down command',
+        '  key code 48', // Tab
+        '  key up command',
+        'end tell',
+      ].join('\n');
+      execFile('osascript', ['-e', script], err => {
+        if (err) {
+          console.warn('refocus previous app (Cmd+Tab) failed:', err.message);
+        }
+      });
+    }
+  };
+  setTimeout(run, delayMs);
+}
 
 function createTrayIconFallback() {
   const p = path.join(__dirname, 'icon', 'Template.png');
@@ -109,6 +139,7 @@ function createOverlay() {
     if (spawnQueued && overlay && overlay.isVisible()) {
       spawnQueued = false;
       overlay.webContents.send('spawn-whip');
+      refocusPreviousApp();
     }
   });
   overlay.on('closed', () => {
@@ -127,6 +158,7 @@ function toggleOverlay() {
   overlay.show();
   if (overlayReady) {
     overlay.webContents.send('spawn-whip');
+    refocusPreviousApp();
   } else {
     spawnQueued = true;
   }
