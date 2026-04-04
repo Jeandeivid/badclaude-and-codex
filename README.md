@@ -1,6 +1,8 @@
 # badclaude
 
-Sometimes claude code is going too shlow, you should whip him into shape..
+![Whip divider](assets/divider.png)
+
+Sometimes claude code is going too shlow, and you must whip him into shape..
 
 ## Install + run (global CLI)
 
