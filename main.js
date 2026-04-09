@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execFile } = require('child_process');
+const { buildLinuxMacroCommands, buildLinuxRefocusArgs } = require('./lib/linux-support');
 
 // ── Win32 FFI (Windows only) ────────────────────────────────────────────────
 let keybd_event, VkKeyScanA;
@@ -18,9 +19,11 @@ if (process.platform === 'win32') {
 }
 
 // ── Globals ─────────────────────────────────────────────────────────────────
-let tray, overlay;
-let overlayReady = false;
+let tray;
+let overlays = [];
+let overlaysReady = 0;
 let spawnQueued = false;
+let linuxTargetWindowId = null;
 
 const VK_CONTROL = 0x11;
 const VK_RETURN  = 0x0D;
@@ -52,9 +55,27 @@ function refocusPreviousApp() {
           console.warn('refocus previous app (Cmd+Tab) failed:', err.message);
         }
       });
+    } else if (process.platform === 'linux') {
+      execFile('xdotool', buildLinuxRefocusArgs(linuxTargetWindowId), err => {
+        if (err) {
+          console.warn('refocus previous app failed:', err.message);
+        }
+      });
     }
   };
   setTimeout(run, delayMs);
+}
+
+function captureLinuxActiveWindow() {
+  if (process.platform !== 'linux') return;
+  execFile('xdotool', ['getactivewindow'], (err, stdout) => {
+    if (err) {
+      linuxTargetWindowId = null;
+      return;
+    }
+    const nextWindowId = String(stdout || '').trim();
+    linuxTargetWindowId = nextWindowId || null;
+  });
 }
 
 function createTrayIconFallback() {
@@ -114,50 +135,65 @@ async function getTrayIcon() {
   return createTrayIconFallback();
 }
 
-// ── Overlay window ──────────────────────────────────────────────────────────
-function createOverlay() {
-  const { bounds } = screen.getPrimaryDisplay();
-  overlay = new BrowserWindow({
-    x: bounds.x, y: bounds.y,
-    width: bounds.width, height: bounds.height,
-    transparent: true,
-    frame: false,
-    alwaysOnTop: true,
-    focusable: false,
-    skipTaskbar: true,
-    resizable: false,
-    hasShadow: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-    },
-  });
-  overlay.setAlwaysOnTop(true, 'screen-saver');
-  overlayReady = false;
-  overlay.loadFile('overlay.html');
-  overlay.webContents.on('did-finish-load', () => {
-    overlayReady = true;
-    if (spawnQueued && overlay && overlay.isVisible()) {
-      spawnQueued = false;
-      overlay.webContents.send('spawn-whip');
-      refocusPreviousApp();
-    }
-  });
-  overlay.on('closed', () => {
-    overlay = null;
-    overlayReady = false;
-    spawnQueued = false;
+// ── Overlay windows ─────────────────────────────────────────────────────────
+function createOverlays() {
+  const displays = screen.getAllDisplays();
+  overlays = [];
+  overlaysReady = 0;
+  spawnQueued = false;
+
+  displays.forEach(display => {
+    const { bounds } = display;
+    const overlay = new BrowserWindow({
+      x: bounds.x, y: bounds.y,
+      width: bounds.width, height: bounds.height,
+      transparent: true,
+      frame: false,
+      alwaysOnTop: true,
+      focusable: false,
+      skipTaskbar: true,
+      resizable: false,
+      hasShadow: false,
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+      },
+    });
+    overlay.setAlwaysOnTop(true, 'screen-saver');
+    overlay.loadFile('overlay.html');
+    overlay.webContents.on('did-finish-load', () => {
+      overlaysReady++;
+      if (spawnQueued && overlaysReady === overlays.length) {
+        spawnQueued = false;
+        overlays.forEach(win => win.webContents.send('spawn-whip'));
+        refocusPreviousApp();
+      }
+    });
+    overlay.on('closed', () => {
+      overlays = overlays.filter(win => win !== overlay);
+    });
+    overlays.push(overlay);
   });
 }
 
+function destroyOverlays() {
+  overlays.forEach(overlay => {
+    if (!overlay.isDestroyed()) overlay.destroy();
+  });
+  overlays = [];
+  overlaysReady = 0;
+  spawnQueued = false;
+}
+
 function toggleOverlay() {
-  if (overlay && overlay.isVisible()) {
-    overlay.webContents.send('drop-whip');
+  if (overlays.length > 0) {
+    destroyOverlays();
     return;
   }
-  if (!overlay) createOverlay();
-  overlay.show();
-  if (overlayReady) {
-    overlay.webContents.send('spawn-whip');
+  captureLinuxActiveWindow();
+  createOverlays();
+  overlays.forEach(overlay => overlay.show());
+  if (overlaysReady === overlays.length) {
+    overlays.forEach(overlay => overlay.webContents.send('spawn-whip'));
     refocusPreviousApp();
   } else {
     spawnQueued = true;
@@ -172,7 +208,9 @@ ipcMain.on('whip-crack', () => {
     console.warn('sendMacro failed:', err?.message || err);
   }
 });
-ipcMain.on('hide-overlay', () => { if (overlay) overlay.hide(); });
+ipcMain.on('hide-overlay', () => {
+  destroyOverlays();
+});
 
 // ── Macro: immediate Ctrl+C, type "Go FASER", Enter ───────────────────────
 function sendMacro() {
@@ -192,6 +230,8 @@ function sendMacro() {
     sendMacroWindows(chosen);
   } else if (process.platform === 'darwin') {
     sendMacroMac(chosen);
+  } else if (process.platform === 'linux') {
+    sendMacroLinux(chosen);
   }
 }
 
@@ -239,12 +279,47 @@ function sendMacroMac(text) {
   });
 }
 
+function sendMacroLinux(text) {
+  const commands = buildLinuxMacroCommands(text, linuxTargetWindowId);
+  runXdotoolCommands(commands).catch(err => {
+    console.warn('linux macro failed (install xdotool):', err.message);
+  });
+}
+
+async function runXdotoolCommands(commands) {
+  for (let i = 0; i < commands.length; i++) {
+    await new Promise((resolve, reject) => {
+      execFile('xdotool', commands[i], err => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve();
+      });
+    });
+
+    // Give the desktop a moment to finish focusing the target window.
+    if (i === 0 && commands[i][0] === 'windowactivate') {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+}
+
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('enable-transparent-visuals');
+}
+
 // ── App lifecycle ───────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
+  if (process.platform === 'linux') {
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
   tray = new Tray(await getTrayIcon());
   tray.setToolTip('Bad Claude – click for whip');
   tray.setContextMenu(
     Menu.buildFromTemplate([
+      { label: 'Whip!', click: () => toggleOverlay() },
+      { type: 'separator' },
       { label: 'Quit', click: () => app.quit() },
     ])
   );

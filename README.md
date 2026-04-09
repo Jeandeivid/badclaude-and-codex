@@ -11,12 +11,24 @@ npm install -g badclaude
 badclaude
 ```
 
+### Linux prerequisites
+
+```bash
+sudo apt install xdotool
+```
+
 ## Controls
 
-- Click tray icon: spawn whip.
-- Click: drop whip.
+- Click tray icon: spawn whip on every display.
+- Click again or click in the overlay: dismiss whip.
 - Whip him 😩💢
 - It sends an interrupt (Ctrl-C) and one of 5 encouraging messages!
+
+## Linux support
+
+- Linux is supported alongside macOS and Windows.
+- On multi-monitor setups, the whip appears on every display.
+- On Linux the keyboard macro uses `xdotool`, so X11/XWayland setups are the best-supported path.
 
 ## Roadmap
 

@@ -1,21 +1,34 @@
 #!/usr/bin/env node
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
+const { getLauncherEnv } = require('../lib/linux-support');
 
 let electronBinary;
 try {
   electronBinary = require('electron');
 } catch (e) {
-  console.error('Could not load Electron. Try: npm install -g badclaude');
-  process.exit(1);
+  try {
+    const cmd = process.platform === 'win32' ? 'where electron' : 'which electron';
+    electronBinary = execSync(cmd, { encoding: 'utf-8' }).trim().split('\n')[0];
+  } catch (lookupError) {
+    console.error('badclaude: Electron not found.');
+    console.error('');
+    console.error('  Install with: npm install -g electron');
+    if (process.platform === 'linux') {
+      console.error('  On Linux also: sudo apt install xdotool');
+    }
+    process.exit(1);
+  }
 }
 
 const appPath = path.resolve(__dirname, '..');
+const env = getLauncherEnv(process.env);
 
 const child = spawn(electronBinary, [appPath], {
   detached: true,
   stdio: 'ignore',
   windowsHide: true,
+  env,
 });
 
 child.on('error', (err) => {
